@@ -19,7 +19,8 @@ executable agda-light
   main-is:             Main.hs
   -- other-modules:       
   -- other-extensions:    
-  build-depends:       base >=4.9 && <4.10,
+  build-depends:       acid-state >= 0.14.3,
+                       base >=4.9 && <4.10,
                        containers >= 0.5.7.1,
                        text >= 1.2.2.1
   -- hs-source-dirs:      
