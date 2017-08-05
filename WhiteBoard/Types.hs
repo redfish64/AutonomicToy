@@ -15,6 +15,9 @@ data WBMonad x
 
 type WBId = Text
 
+data 
+
+
 class (Eq v, Typeable v, Serializable v) => WBObj v where
   wbId :: v -> WBId             -- ^ an id that is unique up to the data type.
           -- Ex, if you have a Foo data type and a Bar data type and their id are both
@@ -49,13 +52,15 @@ instance Monad WBMonad where
 --   } deriving (Typeable)
 
 
--- data WhiteBoard = {
---   wbd :: DBRef WhiteBoardData,
---   wbTypes :: 
+data (Serializable key, Eq key) => WhiteBoard key = WhiteBoard key {
+  keyToAction :: (key -> WBMonad ())
+  dirtyObjectQueueHead :: DBRef (DirtyQueueEntry key),
+  dirtyObjectQueueTail :: DBRef (DirtyQueueEntry key),
+  }
+  
 
--- data WhiteBoardData = WhiteBoardData {
---   dirtyObjectQueue :: [DBRef WBObjable]
---   } --deriving (Typeable,Show,Read)
+data WhiteBoardData = WhiteBoardData {
+  } --deriving (Typeable,Show,Read)
 
 -- instance Indexable WhiteBoardData where
 --   key _ = "WhiteBoard!"
