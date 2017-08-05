@@ -11,11 +11,10 @@ import System.Environment (getArgs)
 main :: IO ()
 main =
   do
-    wb <- openWhiteBoard "whiteboard.data/"
+    wb <- openWhiteBoard 
     argsStr <- getArgs
     contentsArray <- mapM I.readFile argsStr
     addAnchorObjects wb (P.zipWith File argsStr contentsArray) 
-
 
 data File = File {
   fp :: FilePath,
@@ -35,7 +34,8 @@ parseFile txt = do
 
 
 parseSyntax :: Text -> Either [Error] [Sym]
-parseSyntax = undefined
+parseSyntax = --undefined
+  return Left [Error "foo"]
 
 
 data Sym
