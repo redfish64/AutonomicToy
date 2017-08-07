@@ -17,62 +17,64 @@ import Control.Monad.Reader
 import Data.IORef
 import WhiteBoard.Monitor
 
-data WBConf key = WBConf {
-  keyToAction :: (key -> WBMonad key ()),
+data WBConf = WBConf {
+  keyToAction :: (Key -> WBMonad ()),
   wbMon :: Monitor, -- ^ monitor used for managing queue of objects in whiteboard
-  wbRef :: DBRef (WhiteBoard key) -- ^ contains ref to whiteboard singleton
+  wbRef :: DBRef WhiteBoard -- ^ contains ref to whiteboard singleton
   }
 
-data WhiteBoard key = WhiteBoard {
-  queue :: Seq key -- ^ queue of dirty objects, FIFO.. dirty object are added to the end
+data WhiteBoard = WhiteBoard {
+  queue :: Seq Key -- ^ queue of dirty objects, FIFO.. dirty object are added to the end
   } deriving (Show,Read)
 
 
-type WBMonad key = ReaderT (WBConf key) IO
+type WBMonad = ReaderT WBConf IO
 
-runWBMonad :: (Keyable kt) => WBConf kt -> WBMonad kt x -> IO x
+runWBMonad :: WBConf -> WBMonad x -> IO x
 runWBMonad wbc m = runReaderT m wbc
 
-class (Typeable k, Show k, Read k, Eq k, Serializable k) => Keyable k
-
-whiteBoardKey :: String
+whiteBoardKey :: Key
 whiteBoardKey = "_WhiteBoard"
 
-instance Show kt => Indexable (WhiteBoard kt) where
+instance Indexable WhiteBoard where
   key _ = whiteBoardKey -- ^ WhiteBoard is a singleton
 
-instance (Keyable kt) => Serializable (WhiteBoard kt) where
+instance Serializable (WhiteBoard ) where
   --TODO 4 PERF make these more binary'ie
   serialize= BL.pack . show
   deserialize= read . BL.unpack
 
-data Obj = Valid BL.ByteString -- ^ object is just a bytestring. It's up to the user to abstract anyway he sees fit
+data Payload obj = Valid obj -- ^ valid object which can be stored in database
   | MultipleStorers -- ^ if multiple objects try to write to same object, it is an error, and no value is used
   | Empty -- ^ No objects have stored the value for this object
   deriving (Show, Read, Eq)
 
-data ObjMeta kt = ObjMeta {
-  key :: kt,
-  obj :: Obj,
-  referersKeys :: [kt], -- ^ objects that load, or store this object, so if it changes, they become dirty. In the case of storers, if there are multiple stores, we have to report an error, so this keeps track of them as well.
-  referers :: Maybe [ObjMeta kt], -- ^ populated on demand from referersKeys
-  storedObjsKeys :: [kt], -- ^ objects stored by this object. We need this to be able to clean
+data ObjMeta o = ObjMeta {
+  key :: Key,
+  payload :: Payload o,
+  referersKeys :: [Key], -- ^ objects that load, or store this object, so if it changes, they become dirty. In the case of storers, if there are multiple stores, we have to report an error, so this keeps track of them as well.
+  referers :: Maybe [ObjMeta o], -- ^ populated on demand from referersKeys
+  storedObjsKeys :: [Key], -- ^ objects stored by this object. We need this to be able to clean
     --up objects, when the objects that are stored change when we rerun.
 
-  storedObjs :: Maybe [ObjMeta kt] -- ^ populated on demand from storedObjsKeys
+  storedObjs :: Maybe [ObjMeta o] -- ^ populated on demand from storedObjsKeys
   
   } deriving (Show,Read)
 
-instance Show kt => Indexable (ObjMeta kt) where
-  key = show . WhiteBoard.Types.key
+instance Indexable (ObjMeta o) where
+  key = WhiteBoard.Types.key
 
-instance (Show kt,Read kt) => Serializable (ObjMeta kt) where
+class (Typeable o,Indexable o,Serializable o,Eq o,Show o,Read o) => WBObj o  
+
+instance WBObj o => Serializable (ObjMeta o) where
   --TODO 4 PERF make these more binary'ie
+  --TODO 2 make sure we take advantage of the serialization of o
   serialize= BL.pack . show
   deserialize= read . BL.unpack
 
 type WBId = Text
 
+type Key = String
 
 -- class (Eq v, Typeable v, Serializable v) => ObjMeta v where
 --   wbId :: v -> WBId             -- ^ an id that is unique up to the data type.

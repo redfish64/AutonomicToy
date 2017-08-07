@@ -23,15 +23,11 @@ main =
     finishWhiteBoard
 
 
-data Key = File FilePath deriving (Show, Read, Eq)
-
 instance Serializable Key where
   serialize= BL.pack . show
   deserialize= read . BL.unpack
 
   
-instance Keyable Key where
-
 keyToActionFunc :: Key -> WBMonad Key ()
 keyToActionFunc (File _) = return ()
 
