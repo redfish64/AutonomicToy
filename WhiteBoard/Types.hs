@@ -15,10 +15,12 @@ import Data.ByteString
 import Control.Monad.State
 import Control.Monad.Reader
 import Data.IORef
+import WhiteBoard.Monitor
 
 data WBConf key = WBConf {
   keyToAction :: (key -> WBMonad key ()),
-  wbRef :: DBRef (WhiteBoard key) -- should always contain a valid ref to a whiteboard
+  wbMon :: Monitor, -- ^ monitor used for managing queue of objects in whiteboard
+  wbRef :: DBRef (WhiteBoard key) -- ^ contains ref to whiteboard singleton
   }
 
 data WhiteBoard key = WhiteBoard {

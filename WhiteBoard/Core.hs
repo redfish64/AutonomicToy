@@ -1,4 +1,4 @@
-module WhiteBoard.Core where
+module WhiteBoard.Core(createWBConf,addAnchorObjects,storeObject,loadObject,startWhiteBoard,finishWhiteBoard) where
 
 import WhiteBoard.Types as WT
 import Data.TCache
@@ -114,9 +114,23 @@ storeObject = undefined
 loadObject :: k -> WBMonad k ()
 loadObject = undefined
 
-startWhiteBoard :: IO ()
-startWhiteBoard = syncWrite (Asyncronous {frecuency = 5, check = defaultCheck, cacheSize=100})
+-- TODO PERF 3 we need to think about cache and how to deal with removal
+-- the below "defaultCheck" will clear items from the cache once they exceed cache size
+-- it will clean all elements that haven't been referenced in half the frequency
+--TODO 2 make frequency and cacheSize parameters (or in WBConf)
+-- | starts the whiteboard background threads
+startWhiteBoard :: (Keyable k) => WBConf k -> IO ()
+startWhiteBoard wbc = do
+  syncWrite (Asyncronous {frecuency = 5, check = defaultCheck, cacheSize=100})
+  
 
---saves the cache to the database
+-- | saves the cache to the database
 finishWhiteBoard :: IO ()
 finishWhiteBoard = syncCache
+
+-- | thread for running tasks in the dirty queue
+dirtyQueueThread :: (Keyable k) => WBMonad k ()
+dirtyQueueThread = undefined
+
+    
+  
