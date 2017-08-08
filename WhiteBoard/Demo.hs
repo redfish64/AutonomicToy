@@ -2,7 +2,7 @@
 module Main where
 
 import WhiteBoard.Types as WT
-import WhiteBoard.Core
+import WhiteBoard.Core as C
 import Prelude
 import qualified Data.Text as T
 import qualified Data.Text.IO as I
@@ -17,24 +17,32 @@ main =
     argsStr <- getArgs
     contentsArray <- mapM I.readFile argsStr
     wbc <- createWBConf keyToActionFunc
-    startWhiteBoard 
-    runWBMonad wbc $ addAnchorObjects (zip (fmap File argsStr)
-                                       (fmap (BL.pack . T.unpack) contentsArray))
+    startWhiteBoard wbc
+    runWBMonad wbc $ addAnchorObjects (zip (fmap KFile argsStr)
+                                       (fmap File contentsArray))
     finishWhiteBoard
 
+data File = File {
+  contents :: T.Text
+  } deriving (Show, Read, Eq)
+
+instance Serializable File where
+  serialize= BL.pack . show
+  deserialize= read . BL.unpack
+
+instance WBObj File 
+
+data Key = KFile FilePath deriving (Show, Read, Eq)
 
 instance Serializable Key where
   serialize= BL.pack . show
   deserialize= read . BL.unpack
-
   
-keyToActionFunc :: Key -> WBMonad Key ()
-keyToActionFunc (File _) = return ()
+instance Keyable Key where
 
--- data File = File {
---   fp :: FilePath,
---   contents :: Text
---   } deriving (Show)
+keyToActionFunc :: Key -> WBMonad Key ()
+keyToActionFunc (KFile _) = return ()
+
 
 -- instance WBObj File where
 --   key x = [pack . fp $ x]

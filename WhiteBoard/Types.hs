@@ -17,29 +17,29 @@ import Control.Monad.Reader
 import Data.IORef
 import WhiteBoard.Monitor
 
-data WBConf = WBConf {
-  keyToAction :: (Key -> WBMonad ()),
+data WBConf k = WBConf {
+  keyToAction :: (k -> WBMonad k ()),
   wbMon :: Monitor, -- ^ monitor used for managing queue of objects in whiteboard
-  wbRef :: DBRef WhiteBoard -- ^ contains ref to whiteboard singleton
+  wbRef :: DBRef (WhiteBoard k) -- ^ contains ref to whiteboard singleton
   }
 
-data WhiteBoard = WhiteBoard {
-  queue :: Seq Key -- ^ queue of dirty objects, FIFO.. dirty object are added to the end
+data WhiteBoard k = WhiteBoard {
+  queue :: Seq k -- ^ queue of dirty objects, FIFO.. dirty object are added to the end
   } deriving (Show,Read)
 
 
-type WBMonad = ReaderT WBConf IO
+type WBMonad k = ReaderT (WBConf k) IO
 
-runWBMonad :: WBConf -> WBMonad x -> IO x
+runWBMonad :: (WBConf k) -> WBMonad k x -> IO x
 runWBMonad wbc m = runReaderT m wbc
 
-whiteBoardKey :: Key
+whiteBoardKey :: String
 whiteBoardKey = "_WhiteBoard"
 
-instance Indexable WhiteBoard where
+instance Indexable (WhiteBoard k) where
   key _ = whiteBoardKey -- ^ WhiteBoard is a singleton
 
-instance Serializable (WhiteBoard ) where
+instance (Keyable k) => Serializable (WhiteBoard k) where
   --TODO 4 PERF make these more binary'ie
   serialize= BL.pack . show
   deserialize= read . BL.unpack
@@ -49,24 +49,24 @@ data Payload obj = Valid obj -- ^ valid object which can be stored in database
   | Empty -- ^ No objects have stored the value for this object
   deriving (Show, Read, Eq)
 
-data ObjMeta o = ObjMeta {
-  key :: Key,
+data ObjMeta k o = ObjMeta {
+  key :: k,
   payload :: Payload o,
-  referersKeys :: [Key], -- ^ objects that load, or store this object, so if it changes, they become dirty. In the case of storers, if there are multiple stores, we have to report an error, so this keeps track of them as well.
-  referers :: Maybe [ObjMeta o], -- ^ populated on demand from referersKeys
-  storedObjsKeys :: [Key], -- ^ objects stored by this object. We need this to be able to clean
+  referersKeys :: [k], -- ^ objects that load, or store this object, so if it changes, they become dirty. In the case of storers, if there are multiple stores, we have to report an error, so this keeps track of them as well.
+  referers :: Maybe [ObjMeta k o], -- ^ populated on demand from referersKeys
+  storedObjsKeys :: [k], -- ^ objects stored by this object. We need this to be able to clean
     --up objects, when the objects that are stored change when we rerun.
 
-  storedObjs :: Maybe [ObjMeta o] -- ^ populated on demand from storedObjsKeys
+  storedObjs :: Maybe [ObjMeta k o] -- ^ populated on demand from storedObjsKeys
   
   } deriving (Show,Read)
 
-instance Indexable (ObjMeta o) where
-  key = WhiteBoard.Types.key
+instance (Show k) => Indexable (ObjMeta k o) where
+  key = show . WhiteBoard.Types.key
 
-class (Typeable o,Indexable o,Serializable o,Eq o,Show o,Read o) => WBObj o  
+class (Typeable o,Serializable o,Eq o,Show o,Read o) => WBObj o  
 
-instance WBObj o => Serializable (ObjMeta o) where
+instance (Keyable k, WBObj o) => Serializable (ObjMeta k o) where
   --TODO 4 PERF make these more binary'ie
   --TODO 2 make sure we take advantage of the serialization of o
   serialize= BL.pack . show
@@ -74,7 +74,7 @@ instance WBObj o => Serializable (ObjMeta o) where
 
 type WBId = Text
 
-type Key = String
+class (Typeable k,Serializable k,Eq k,Show k,Read k) => Keyable k
 
 -- class (Eq v, Typeable v, Serializable v) => ObjMeta v where
 --   wbId :: v -> WBId             -- ^ an id that is unique up to the data type.
