@@ -34,14 +34,19 @@ instance WBObj File
 
 data Key = KFile FilePath deriving (Show, Read, Eq)
 
+data MyObj = MOFile FilePath T.Text | MOSym { name :: T.Text, typeText :: T.Text, valText :: T.Text }
+
 instance Serializable Key where
   serialize= BL.pack . show
   deserialize= read . BL.unpack
   
 instance Keyable Key where
 
-keyToActionFunc :: Key -> WBMonad Key ()
-keyToActionFunc (KFile _) = return ()
+actionFunc :: WBIMonad Key  ()
+actionFunc = do
+  (k,o) <- ask
+  case k of
+    (KFile _) -> return ()
 
 
 -- instance WBObj File where

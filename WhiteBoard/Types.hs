@@ -14,47 +14,51 @@ import Data.Sequence(Seq)
 import Data.ByteString
 import Control.Monad.State
 import Control.Monad.Reader
-import Data.IORef
 import WhiteBoard.Monitor
+import Control.Concurrent.Chan.Unagi
+import Control.Concurrent.MVar
 
-data WBConf k = WBConf {
-  keyToAction :: (k -> WBMonad k ()),
-  wbMon :: Monitor, -- ^ monitor used for managing queue of objects in whiteboard
-  wbRef :: DBRef (WhiteBoard k) -- ^ contains ref to whiteboard singleton
+data WBConf k o = WBConf {
+  numWorkingThreads :: Int, -- ^ number of threads to spin up for processing  
+  timeBetweenCommitsSecs :: Int,  -- ^ time between intermediary commits to disk
+  -- (to save work in case of power failure)
+  actionFunc :: WBIMonad k o (), -- ^ function that performs an
+  -- appropriate task(s) for a WBObj (which would typically load and
+  -- store other objects with other keys)
+  inChan :: InChan k, -- ^ Write end of FIFO queue of dirty objects
+  outChan :: OutChan k, -- ^ Read end of FIFO queue of dirty objects
+  schedulerChannel :: MVar (SchedulerEvent k) -- ^ Scheduler thread reads from this to handle
+  --various events. Its job is to decide when to stop working and save to the cache
+  -- It's an MVar because the events should happen rarely, and the scheduler shouldn't
+  -- be very busy, so it should happen fast, and therefore is ok to block
   }
 
-data WhiteBoard k = WhiteBoard {
-  queue :: Seq k -- ^ queue of dirty objects, FIFO.. dirty object are added to the end
-  } deriving (Show,Read)
+data SchedulerEvent k = SEThreadWaiting | SEThreadWorking | SETimerWentOff | AddDirtyItems [k]
 
+-- | this is just an IO monad with the WBConf data 
+type WBMonad k o = ReaderT (WBConf k o) IO
 
-type WBMonad k = ReaderT (WBConf k) IO
+-- | this is the WBMonad with the storer key and the storer obj. Meant to be used within
+--   the keyToAction function.
+type WBIMonad k o = ReaderT (k,ObjMeta k o) (WBMonad k o) 
 
-runWBMonad :: (WBConf k) -> WBMonad k x -> IO x
+runWBMonad :: (WBConf k o) -> WBMonad k o x -> IO x
 runWBMonad wbc m = runReaderT m wbc
 
 whiteBoardKey :: String
 whiteBoardKey = "_WhiteBoard"
 
-instance Indexable (WhiteBoard k) where
-  key _ = whiteBoardKey -- ^ WhiteBoard is a singleton
-
-instance (Keyable k) => Serializable (WhiteBoard k) where
-  --TODO 4 PERF make these more binary'ie
-  serialize= BL.pack . show
-  deserialize= read . BL.unpack
-
-data Payload obj = Valid obj -- ^ valid object which can be stored in database
-  | MultipleStorers -- ^ if multiple objects try to write to same object, it is an error, and no value is used
-  | Empty -- ^ No objects have stored the value for this object
+data Payload obj = PValid obj -- ^ valid object which can be stored in database
+  | PMultipleStorers Int -- ^ if multiple objects try to write to same object, it is an error, and no value is used. Number is the total number of storers
+  | PEmpty -- ^ No objects have stored the value for this object
   deriving (Show, Read, Eq)
 
 data ObjMeta k o = ObjMeta {
   key :: k,
   payload :: Payload o,
-  referersKeys :: [k], -- ^ objects that load, or store this object, so if it changes, they become dirty. In the case of storers, if there are multiple stores, we have to report an error, so this keeps track of them as well.
+  refererKeys :: [k], -- ^ objects that load, or store this object, so if it changes, they become dirty. In the case of storers, if there are multiple stores, we have to report an error, so this keeps track of them as well.
   referers :: Maybe [ObjMeta k o], -- ^ populated on demand from referersKeys
-  storedObjsKeys :: [k], -- ^ objects stored by this object. We need this to be able to clean
+  storedObjKeys :: [k], -- ^ objects stored by this object. We need this to be able to clean
     --up objects, when the objects that are stored change when we rerun.
 
   storedObjs :: Maybe [ObjMeta k o] -- ^ populated on demand from storedObjsKeys
@@ -67,7 +71,7 @@ instance (Show k) => Indexable (ObjMeta k o) where
 class (Typeable o,Serializable o,Eq o,Show o,Read o) => WBObj o  
 
 instance (Keyable k, WBObj o) => Serializable (ObjMeta k o) where
-  --TODO 4 PERF make these more binary'ie
+  --TODO 3.5 PERF make these more binary'ie
   --TODO 2 make sure we take advantage of the serialization of o
   serialize= BL.pack . show
   deserialize= read . BL.unpack
@@ -76,34 +80,17 @@ type WBId = Text
 
 class (Typeable k,Serializable k,Eq k,Show k,Read k) => Keyable k
 
--- class (Eq v, Typeable v, Serializable v) => ObjMeta v where
---   wbId :: v -> WBId             -- ^ an id that is unique up to the data type.
---           -- Ex, if you have a Foo data type and a Bar data type and their id are both
---           -- "1" then this is fine, and they'll still represent separate objects, by
---           -- virtue of their data types being different.
---   action :: v -> WBMonad ()  -- ^ action to run when an object of the data type is created
---   key :: v -> String  -- ^ raw key, must be totally unique
-  --key v = deriveRawKey v (wbId v)
+data DirtyQueue k = DirtyQueue [k] deriving (Eq,Read,Show,Typeable)
 
--- instance (Read a, Show a) => Serializable a where
---    serialize= BL.pack . show
---    deserialize= read . BL.unpack
+instance (Keyable k) => WBObj (DirtyQueue k)
 
+instance (Keyable k) => Serializable (DirtyQueue k) where
+  --TODO 3.5 PERF make these more binary'ie
+  --TODO 2 make sure we take advantage of the serialization of o
+  serialize= BL.pack . show
+  deserialize= read . BL.unpack
 
+instance Indexable (DirtyQueue k) where
+  key _ = "DIRTY QUEUE!"
 
--- data ObjMetaMeta = ObjMetaMeta {
---   obj :: ObjMetaable,  -- ^ object represented by this meta data
---   loaders :: [ObjMetaable], -- ^ objects that load this object (so if it changes, they become dirty)
---   storedObjs :: [ObjMetaable], -- ^ objects stored by this object. We need this to be able to clean
---     --up objects, when the objects that are stored change when we rerun.
---   isDirty :: Bool -- ^ true if the object is dirty 
---   } deriving (Typeable)
-
-
-
--- instance Indexable WhiteBoardData where
---   key _ = "WhiteBoard!"
-
--- deriveRawKey :: Typeable x => x -> Text -> String
--- deriveRawKey x k = (show (typeOf x)) ++ ":" ++ (T.unpack k)
-
+    

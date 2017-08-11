@@ -12,7 +12,7 @@ data Monitor = Monitor
     , monitorCond :: MVar [MVar ()]
     }
 
--- | Repeatedly tests @b@ and runs @doit@ if false.
+-- | Repeatedly tests @b@ and runs @body@ if false.
 whileM :: IO Bool -> IO () -> IO ()
 whileM cond body = doit
   where
@@ -22,6 +22,21 @@ whileM cond body = doit
         if v then
           do body; doit
           else return ()
+          
+
+-- | Repeatedly tests @b@ and runs @body@ if false.
+-- Collesces results of body into list (result will be in reverse order)
+whileMToList :: Monad m => m Bool -> m a -> m [a]
+whileMToList cond body = doit []
+  where
+    doit l =
+      do
+        v <- cond
+        if v then
+          do
+            i <- body
+            doit $ i : l
+          else return l
           
 
 -- | Create a new monitor object, which contains the lock as
