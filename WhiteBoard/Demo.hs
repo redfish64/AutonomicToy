@@ -10,17 +10,27 @@ import System.Environment (getArgs)
 import qualified Data.ByteString.Lazy.Char8 as BL(pack,unpack,ByteString(..))
 import Data.TCache.Defs(Serializable(..))
 import Control.Concurrent
+import Control.Monad.Reader
 
 main :: IO ()
 main =
   do
     argsStr <- getArgs
+    _test argsStr
+    return ()
+
+_test :: [String] -> IO (WBConf Key MyObj)
+_test argsStr =
+  do
     contentsArray <- mapM I.readFile argsStr
-    wbc <- createWBConf keyToActionFunc
+    wbc <- createWBConf myActionFunc
     startWhiteBoard wbc
     runWBMonad wbc $ addAnchorObjects (zip (fmap KFile argsStr)
-                                       (fmap File contentsArray))
-    finishWhiteBoard
+                                       (fmap (\(fn,fc) -> MOFile fn fc) (zip argsStr contentsArray)))
+    finishWhiteBoard wbc
+
+    return wbc
+    
 
 data File = File {
   contents :: T.Text
@@ -34,7 +44,13 @@ instance WBObj File
 
 data Key = KFile FilePath deriving (Show, Read, Eq)
 
-data MyObj = MOFile FilePath T.Text | MOSym { name :: T.Text, typeText :: T.Text, valText :: T.Text }
+data MyObj = MOFile FilePath T.Text | MOSym { name :: T.Text, typeText :: T.Text, valText :: T.Text } deriving (Show,Read,Eq)
+
+instance WBObj MyObj where
+
+instance Serializable MyObj where
+  serialize= BL.pack . show
+  deserialize= read . BL.unpack
 
 instance Serializable Key where
   serialize= BL.pack . show
@@ -42,8 +58,8 @@ instance Serializable Key where
   
 instance Keyable Key where
 
-actionFunc :: WBIMonad Key  ()
-actionFunc = do
+myActionFunc :: WBIMonad Key MyObj ()
+myActionFunc = do
   (k,o) <- ask
   case k of
     (KFile _) -> return ()

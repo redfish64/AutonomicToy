@@ -235,13 +235,17 @@ loadObject k =
 -- | starts the whiteboard background threads
 startWhiteBoard :: (Keyable k, WBObj o) => WBConf k o -> IO ()
 startWhiteBoard wbc = do
+  forkIO $ runReaderT schedulerThread wbc
+  replicateM (numWorkingThreads wbc) (forkIO $ (runReaderT workerThread wbc))
+  return ()
+             
   --TODO we will sync ourselves, so we can empty the dirty queue into a dbref
-  syncWrite (Asyncronous {frecuency = 5, check = defaultCheck, cacheSize=100})
   
 
 -- | saves the cache to the database
-finishWhiteBoard :: IO ()
-finishWhiteBoard = syncCache
+finishWhiteBoard :: WBConf k o -> IO ()
+finishWhiteBoard _ = return ()
+  
 
 
 
@@ -281,10 +285,8 @@ data STReadEventMode = STWorkingMode | STStoreToCacheMode
 schedulerThread :: (Keyable k, WBObj o) => WBMonad k o ()
 schedulerThread =
   do
-    wakeUpOnTimer
     --start in mode 1
-    runStateT mode1 0 -- all worker threads start up in processing mode
-
+    mode1Prep
     return ()
   where
     readEvent :: WBMonad k o (SchedulerEvent k)
@@ -292,21 +294,33 @@ schedulerThread =
       wbc <- ask
       liftIO $ takeMVar (schedulerChannel wbc)
 
-    
+    mode1Prep :: (Keyable k) => WBMonad k o ()
+    mode1Prep =
+      do
+        liftIO $ putStrLn "mode1Prep"
+        wakeUpOnTimer
+        runStateT mode1 0 -- all worker threads start up in processing mode,
+        --so there are 0 threads asleep
+        return ()
+
     --working mode
     mode1 :: (Keyable k) => StateT Int (WBMonad k o) ()
     mode1 =
       do
+        liftIO $ putStrLn "mode1"
         wbc <- ask
 
         --read the next event
         event <- lift $ readEvent
+        liftIO $ putStrLn $ "readEvent " ++ (show event)
         case (event) of
           SEThreadWaiting ->
             do
               modify (+1)
               threadsWaiting <- get
               ce <- liftIO $ isChanEmpty $ outChan wbc
+              liftIO $ putStrLn $ "threadsWaiting: "++(show threadsWaiting) ++
+                    ", channelEmpty: " ++ (show ce)
               if threadsWaiting == (numWorkingThreads wbc) && ce then
                 do
                   --no threads are processing and the queue is empty, work is done
@@ -324,6 +338,7 @@ schedulerThread =
     mode2Prep :: (Keyable k) => StateT Int (WBMonad k o) ()
     mode2Prep =
       do
+        liftIO $ putStrLn "mode2Prep"
         wbc <- ask
 
         --empty queue of dirty items so threads stop quicker
@@ -334,6 +349,7 @@ schedulerThread =
     mode2 :: (Keyable k) => StateT ([k],Int) (WBMonad k o) ()
     mode2 =
       do 
+        liftIO $ putStrLn "mode2"
         wbc <- ask
         event <- lift $ readEvent
         
@@ -359,6 +375,7 @@ schedulerThread =
     --about this. 
     mode3 :: (Keyable k) => [k] -> WBMonad k o ()
     mode3 keys = do
+      liftIO $ putStrLn "mode3"
       --save the entire cache as a single transaction (so that if there is a power failure,
       --we either commit all or none)
       lift $ atomically $ do
@@ -379,13 +396,14 @@ schedulerThread =
         do
           --write out the list to the active queue so the threads start processing
           liftIO $ writeList2Chan (inChan $ wbc) keys
-          runStateT mode1 0
+          mode1Prep
           return ()
           
 
     --here, we wait until we get an item to process
     mode3Purgatory :: (Keyable k) => WBMonad k o ()
     mode3Purgatory = do
+      liftIO $ putStrLn "mode3Purgatory"
       event <- readEvent
 
       case (event) of
@@ -399,11 +417,14 @@ schedulerThread =
 
 
     --notify ourselves to wake up when we need to save the intermediate state
+    wakeUpOnTimer :: (Keyable k) => WBMonad k o ()
     wakeUpOnTimer =
       do
+        liftIO $ putStrLn "wakeUpOnTimer"
         wbc <- ask
         lift $ startTimerThread (timeBetweenCommitsSecs wbc * 1000 * 1000) $ 
           putMVar (schedulerChannel wbc) SETimerWentOff
+        return ()
 
 
 -- | returns true if the channel is empty
@@ -421,8 +442,8 @@ startTimerThread waitTimeMicroSecs actionToPerform =
   forkIO $ (threadDelay waitTimeMicroSecs >> actionToPerform)
 
 -- | thread for running tasks in the dirty queue
-dirtyQueueThread :: (Keyable k, WBObj o) => WBMonad k o ()
-dirtyQueueThread =
+workerThread :: (Keyable k, WBObj o) => WBMonad k o ()
+workerThread =
   do
     iterateWhile isWorkingMode processItem
   where

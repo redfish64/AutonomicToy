@@ -33,7 +33,7 @@ data WBConf k o = WBConf {
   -- be very busy, so it should happen fast, and therefore is ok to block
   }
 
-data SchedulerEvent k = SEThreadWaiting | SEThreadWorking | SETimerWentOff | AddDirtyItems [k]
+data SchedulerEvent k = SEThreadWaiting | SEThreadWorking | SETimerWentOff | AddDirtyItems [k] deriving (Show)
 
 -- | this is just an IO monad with the WBConf data 
 type WBMonad k o = ReaderT (WBConf k o) IO
