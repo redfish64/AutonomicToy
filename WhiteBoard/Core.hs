@@ -26,12 +26,18 @@ createWBConf actionFunc =
     wIR <- newIORef 0
     (ic,oc) <- newChan
     m <- newEmptyMVar
+    ip <- newIORef 0
+    ia <- newIORef 0
+    
     atomically $
       do
         return $ WBConf { numWorkingThreads = 5, timeBetweenCommitsSecs = 60,
                           actionFunc = actionFunc,
                           inChan = ic, outChan = oc,
-                          schedulerChannel = m}
+                          schedulerChannel = m,
+                          itemsProcessed = ip,
+                          itemsAdded = ia
+                          }
 
 
 
@@ -317,11 +323,8 @@ schedulerThread =
           SEThreadWaiting ->
             do
               modify (+1)
-              threadsWaiting <- get
-              ce <- liftIO $ isChanEmpty $ outChan wbc
-              liftIO $ putStrLn $ "threadsWaiting: "++(show threadsWaiting) ++
-                    ", channelEmpty: " ++ (show ce)
-              if threadsWaiting == (numWorkingThreads wbc) && ce then
+              ps <- isProcessingStopped
+              if ps then
                 do
                   --no threads are processing and the queue is empty, work is done
                   --go to mode 2
@@ -331,8 +334,25 @@ schedulerThread =
           SEThreadWorking -> modify pred >> mode1
           SETimerWentOff -> mode2Prep --when the timer goes off, we need to do a save of our partially completed work and then continue
           AddDirtyItems ks -> do
-            liftIO $ writeList2Chan (inChan wbc) ks --write to the input queue so the workers can get started
+            --write to the input queue so the workers can get started
+            lift $ addDirtyItems ks
             mode1
+    isProcessingStopped :: (WBMonad k o) Bool
+    isProcessingStopped = do
+      threadsWaiting <- get
+      ce <- liftIO $ isDirtyQueueEmpty wbc
+      liftIO $ putStrLn $ "threadsWaiting: "++(show threadsWaiting) ++
+                    ", channelEmpty: " ++ (show ce)
+      if threadsWaiting == (numWorkingThreads wbc) && ce then
+
+
+    -- adds dirty items to queue and updates WBConf.itemsAdded
+    addDirtyItems :: (Keyable k) => [k] -> (WBMonad k o) ()
+    addDirtyItems ks =
+      do
+        wbc <- ask
+        liftIO $ atomicModifyIORef' (itemsAdded wbc) (\ia -> (ia + (length ks), ()))
+        liftIO $ writeList2Chan (inChan wbc) ks
             
     --prepare to save to cache
     mode2Prep :: (Keyable k) => StateT Int (WBMonad k o) ()
@@ -342,7 +362,7 @@ schedulerThread =
         wbc <- ask
 
         --empty queue of dirty items so threads stop quicker
-        dirtyItems <- whileMToList (fmap not (liftIO $ isChanEmpty $ outChan wbc)) (liftIO $ readChan (outChan wbc))
+        dirtyItems <- whileMToList (fmap not (liftIO $ isDirtyQueueEmpty wbc)) (liftIO $ readChan (outChan wbc))
         threadsWaiting <- get
         lift $ runStateT mode2 (dirtyItems, threadsWaiting)
         return ()
@@ -359,7 +379,7 @@ schedulerThread =
               --add to the thread waiting count
               modify (\(di,tw) -> (di,tw+1))
               (dl,tw) <- get
-              ce <- liftIO $ isChanEmpty $ outChan wbc
+              ce <- liftIO $ isDirtyQueueEmpty wbc
               if tw == (numWorkingThreads wbc) && ce then
                 lift $ mode3 dl
                 else
@@ -395,7 +415,7 @@ schedulerThread =
         else
         do
           --write out the list to the active queue so the threads start processing
-          liftIO $ writeList2Chan (inChan $ wbc) keys
+          addDirtyItems keys 
           mode1Prep
           return ()
           
@@ -410,7 +430,9 @@ schedulerThread =
         AddDirtyItems ks -> do
           wbc <- ask
 
-          liftIO $ writeList2Chan (inChan wbc) ks --write to the input queue so the workers can get started
+          --write to the input queue so the workers can get started
+          addDirtyItems ks
+          
           runStateT mode1 0
           return ()
         _ -> mode3Purgatory
@@ -427,9 +449,13 @@ schedulerThread =
         return ()
 
 
--- | returns true if the channel is empty
-isChanEmpty :: OutChan x -> IO Bool
-isChanEmpty c = getChanContents c >>= return . isEmpty
+-- | returns true if the dirty queue is empty
+isDirtyQueueEmpty :: WBConf k o -> IO Bool
+isDirtyQueueEmpty c = do
+  ip <- readIORef $ itemsProcessed c
+  ia <- readIORef $ itemsAdded c
+
+  return $ ia - ip == 0
 
 isEmpty :: [x] -> Bool
 isEmpty [] = True
@@ -482,3 +508,9 @@ workerThread =
 
         --use the key to create a task, and then run it
         runReaderT (actionFunc wbc) (key,obj)
+
+        --we did a little bit of work, so we update the stats
+        liftIO $ atomicModifyIORef' (itemsProcessed wbc) (\ip -> (succ ip, ())) 
+
+        return ()
+        
