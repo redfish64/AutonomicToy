@@ -28,19 +28,16 @@ data WBConf k o = WBConf {
   -- store other objects with other keys)
   inChan :: InChan k, -- ^ Write end of FIFO queue of dirty objects
   outChan :: OutChan k, -- ^ Read end of FIFO queue of dirty objects
-  schedulerChannel :: MVar (SchedulerEvent k), -- ^ Scheduler thread reads from this to handle
+  schedulerChannel :: MVar (SchedulerEvent k) -- ^ Scheduler thread reads from this to handle
   --various events. Its job is to decide when to stop working and save to the cache
   -- It's an MVar because the events should happen rarely, and the scheduler shouldn't
   -- be very busy, so it should happen fast, and therefore is ok to block
-  itemsProcessed :: IORef Int, -- ^ number of items processed
-  itemsAdded :: IORef Int -- ^ number of items added to dirty queue. Note that the scheduler
-  --thread uses this and itemsProcessed to determine when the queue is empty, so
-  --its always true that: itemsAdded - itemsProcessed >= (actual items in queue)
   }
 
-data SchedulerEvent k = SEThreadWaiting | SEThreadWorking | SETimerWentOff | AddDirtyItems [k]
+data SchedulerEvent k = SEWorkerThreadProcessedItem | SETimerWentOff | AddDirtyItems [k]
   deriving (Show)
 
+  
 -- | this is just an IO monad with the WBConf data 
 type WBMonad k o = ReaderT (WBConf k o) IO
 
@@ -74,7 +71,7 @@ data ObjMeta k o = ObjMeta {
 instance (Show k) => Indexable (ObjMeta k o) where
   key = show . WhiteBoard.Types.key
 
-class (Typeable o,Serializable o,Eq o,Show o,Read o) => WBObj o  
+class (Typeable o,Serializable o,Eq o,Show o,Read o) => WBObj o
 
 instance (Keyable k, WBObj o) => Serializable (ObjMeta k o) where
   --TODO 3.5 PERF make these more binary'ie

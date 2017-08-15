@@ -11,6 +11,7 @@ import qualified Data.ByteString.Lazy.Char8 as BL(pack,unpack,ByteString(..))
 import Data.TCache.Defs(Serializable(..))
 import Control.Concurrent
 import Control.Monad.Reader
+import System.IO
 
 main :: IO ()
 main =
@@ -24,9 +25,14 @@ _test argsStr =
   do
     contentsArray <- mapM I.readFile argsStr
     wbc <- createWBConf myActionFunc
+    let objsToAdd = (zip (fmap KFile argsStr)
+                       (fmap (\(fn,fc) -> MOFile fn fc) (zip argsStr contentsArray)))
+
+    putStrLn $ "objsToAdd: "++(show objsToAdd)
+
     startWhiteBoard wbc
-    runWBMonad wbc $ addAnchorObjects (zip (fmap KFile argsStr)
-                                       (fmap (\(fn,fc) -> MOFile fn fc) (zip argsStr contentsArray)))
+
+    runWBMonad wbc $ addAnchorObjects objsToAdd
     finishWhiteBoard wbc
 
     return wbc

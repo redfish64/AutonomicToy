@@ -34,9 +34,7 @@ createWBConf actionFunc =
         return $ WBConf { numWorkingThreads = 5, timeBetweenCommitsSecs = 60,
                           actionFunc = actionFunc,
                           inChan = ic, outChan = oc,
-                          schedulerChannel = m,
-                          itemsProcessed = ip,
-                          itemsAdded = ia
+                          schedulerChannel = m
                           }
 
 
@@ -60,7 +58,8 @@ addAnchorObjects kv =
       --notify the scheduler to add the items to the dirty queue for processing
       lift $ addDirtyItems wbc updatedKeys
   where
-    --saves a list of items, returning the keys of the objects that are dirty
+    --saves a list of items, returning the keys of the objects that are dirty (ie weren't
+    --already there, or were there but had a differing value)
     saveItems :: (WBObj obj, Keyable k) => [(k, Payload obj)] -> STM [k]
     saveItems items = foldM
       (\l i -> 
@@ -86,10 +85,10 @@ addAnchorObjects kv =
           --object doesn't exist so create a new one and save it
           Nothing -> 
             fmap Just (writeObj ref (ObjMeta {WT.key=k, payload=p,
-                                              refererKeys = [],
-                                              referers = Nothing,
-                                              storedObjKeys = [],
-                                              storedObjs = Nothing}))
+                                                       refererKeys = [],
+                                                       referers = Nothing,
+                                                       storedObjKeys = [],
+                                                       storedObjs = Nothing}))
                                              
           Just om@(ObjMeta { payload=existingPayload }) -> 
             if existingPayload == p
@@ -97,9 +96,6 @@ addAnchorObjects kv =
             else
               fmap Just $ writeObj ref (updateObjMetaForPayload om p)  --object has changed, so update and save it
 
-        --FIXME HACK
-        return Nothing
-            
     writeObj :: (WBObj o, Keyable k) => DBRef (ObjMeta k o) -> (ObjMeta k o) -> STM (ObjMeta k o)
     writeObj ref om =
       do
@@ -125,7 +121,9 @@ readDBRef' dbr =
 -- Tells the scheduler thread there are dirty items. The scheduler thread will either add
 -- them to the dirty queue 
 addDirtyItems :: (Keyable k, WBObj o) => WBConf k o -> [k] -> IO ()
-addDirtyItems wbc items = putMVar (schedulerChannel wbc) $ AddDirtyItems items
+addDirtyItems wbc items =
+  do
+    putMVar (schedulerChannel wbc) $ AddDirtyItems items
     
     -- mapM newDBRef items
     -- addToDirtyQueue wbd items
@@ -245,9 +243,6 @@ startWhiteBoard wbc = do
   replicateM (numWorkingThreads wbc) (forkIO $ (runReaderT workerThread wbc))
   return ()
              
-  --TODO we will sync ourselves, so we can empty the dirty queue into a dbref
-  
-
 -- | saves the cache to the database
 finishWhiteBoard :: WBConf k o -> IO ()
 finishWhiteBoard _ = return ()
@@ -258,7 +253,25 @@ finishWhiteBoard _ = return ()
 data STReadEventMode = STWorkingMode | STStoreToCacheMode
 
 
-{- | The scheduler thread operates in the following states and state
+--TODO 2.9 look into using something like debrun indexes to merge
+--nodes together that look the same, but use slightly different
+--variables. We'd have to have some way of extracting symbol names out
+-- of symbols to do this.
+--TODO 2.9 Think about whether to keep no longer used items in case
+-- the calculation might be needed again. We would attach a hash
+-- to each item, so that if it is reused again later, we can simply
+-- undelete it rather than recalculate it from scratch
+
+{- |
+
+   The scheduler thread is the heart of the system. Any items that
+   are added to the queue to process is done by communicating to
+   the scheduler thread.
+
+   It also receives a notification whenever a worker thread completes
+   work on a dirty item.
+
+   The scheduler thread operates in the following states and state
    transitions:
 
      1. Working - worker threads process dirty items. All dirty items
@@ -292,7 +305,7 @@ schedulerThread :: (Keyable k, WBObj o) => WBMonad k o ()
 schedulerThread =
   do
     --start in mode 1
-    mode1Prep
+    runStateT mode1Prep (SchedulerData 0 0 [])
     return ()
   where
     readEvent :: WBMonad k o (SchedulerEvent k)
@@ -300,17 +313,15 @@ schedulerThread =
       wbc <- ask
       liftIO $ takeMVar (schedulerChannel wbc)
 
-    mode1Prep :: (Keyable k) => WBMonad k o ()
+    mode1Prep :: (Keyable k) => StateT (SchedulerData k) (WBMonad k o) ()
     mode1Prep =
       do
         liftIO $ putStrLn "mode1Prep"
-        wakeUpOnTimer
-        runStateT mode1 0 -- all worker threads start up in processing mode,
-        --so there are 0 threads asleep
-        return ()
+        lift $ wakeUpOnTimer
+        mode1
 
     --working mode
-    mode1 :: (Keyable k) => StateT Int (WBMonad k o) ()
+    mode1 :: (Keyable k) => StateT (SchedulerData k) (WBMonad k o) ()
     mode1 =
       do
         liftIO $ putStrLn "mode1"
@@ -320,121 +331,137 @@ schedulerThread =
         event <- lift $ readEvent
         liftIO $ putStrLn $ "readEvent " ++ (show event)
         case (event) of
-          SEThreadWaiting ->
+          SEWorkerThreadProcessedItem ->
             do
-              modify (+1)
-              ps <- isProcessingStopped
-              if ps then
-                do
-                  --no threads are processing and the queue is empty, work is done
-                  --go to mode 2
-                  mode2Prep 
-               else
-                mode1
-          SEThreadWorking -> modify pred >> mode1
-          SETimerWentOff -> mode2Prep --when the timer goes off, we need to do a save of our partially completed work and then continue
+              --TODO 2.5 in mode1, we do this, so we don't hang around doing
+              --nothing when all the work is done.. We may want to
+              --change this so that if at least 5 seconds hasn't gone
+              --by, we don't go to mode 2. That way we can still be reponsive
+              --if we get a lot of short bursts of simple work
+              workerThreadProcessedItem mode1 mode2Prep
+          SETimerWentOff -> mode2Prep --when the timer goes off, we
+                                      --need to do a save of our
+                                      --partially completed work and
+                                      --then continue, so we go to mode2
           AddDirtyItems ks -> do
+            liftIO $ putStrLn $ "dirty items " ++ show (length ks)
             --write to the input queue so the workers can get started
-            lift $ addDirtyItems ks
+            addDirtyItems' ks
             mode1
-    isProcessingStopped :: (WBMonad k o) Bool
-    isProcessingStopped = do
-      threadsWaiting <- get
-      ce <- liftIO $ isDirtyQueueEmpty wbc
-      liftIO $ putStrLn $ "threadsWaiting: "++(show threadsWaiting) ++
-                    ", channelEmpty: " ++ (show ce)
-      if threadsWaiting == (numWorkingThreads wbc) && ce then
 
+    --updates SchedulerData to reflect worker thread processing an item.
+    --if all threads have stopped, runs nextMode, otherwise stays in currMode
+    workerThreadProcessedItem :: (Keyable k) => StateT (SchedulerData k) (WBMonad k o) ()
+      -> StateT (SchedulerData k) (WBMonad k o) ()
+      -> StateT (SchedulerData k) (WBMonad k o) ()
+    workerThreadProcessedItem currMode nextMode =
+      do
+        modify (\ss -> ss { itemsProcessed = succ (itemsProcessed ss) })
+        ps <- fmap isProcessingStopped get 
+        if ps then
+          --no threads are processing and the queue is empty, work is done
+          --go to mode 2 to save.
+          --
+          nextMode
+          else
+          currMode
+
+    -- returns true if number of items added to the queue equals the number of items processed
+    -- this means the queue should be empty and all the threads stopped
+    isProcessingStopped :: (SchedulerData k) -> Bool
+    isProcessingStopped ss = (itemsAdded ss) - (itemsProcessed ss) == 0
 
     -- adds dirty items to queue and updates WBConf.itemsAdded
-    addDirtyItems :: (Keyable k) => [k] -> (WBMonad k o) ()
-    addDirtyItems ks =
+    addDirtyItems' :: (Keyable k) => [k] -> StateT (SchedulerData k) (WBMonad k o) ()
+    addDirtyItems' ks =
       do
-        wbc <- ask
-        liftIO $ atomicModifyIORef' (itemsAdded wbc) (\ia -> (ia + (length ks), ()))
+        modify (\ss -> ss { itemsAdded = (itemsAdded ss) + (length ks) })
+        wbc <- lift $ ask
         liftIO $ writeList2Chan (inChan wbc) ks
             
     --prepare to save to cache
-    mode2Prep :: (Keyable k) => StateT Int (WBMonad k o) ()
+    mode2Prep :: (Keyable k) => StateT (SchedulerData k) (WBMonad k o) ()
     mode2Prep =
       do
         liftIO $ putStrLn "mode2Prep"
         wbc <- ask
 
-        --empty queue of dirty items so threads stop quicker
-        dirtyItems <- whileMToList (fmap not (liftIO $ isDirtyQueueEmpty wbc)) (liftIO $ readChan (outChan wbc))
-        threadsWaiting <- get
-        lift $ runStateT mode2 (dirtyItems, threadsWaiting)
-        return ()
-    mode2 :: (Keyable k) => StateT ([k],Int) (WBMonad k o) ()
+        --TODO 3 empty queue of dirty items so threads stop quicker
+        -- dirtyItems <- whileMToList (fmap not (liftIO $ isDirtyQueueEmpty wbc)) (liftIO $ readChan (outChan wbc))
+        -- threadsWaiting <- get
+        
+        mode2
+
+    --as noted above, here we wind down the worker threads if they have current work to do
+    --then go to mode 3 to save
+    mode2 :: (Keyable k) => StateT (SchedulerData k) (WBMonad k o) ()
     mode2 =
       do 
         liftIO $ putStrLn "mode2"
-        wbc <- ask
-        event <- lift $ readEvent
-        
-        case (event) of
-          SEThreadWaiting ->
-            do
-              --add to the thread waiting count
-              modify (\(di,tw) -> (di,tw+1))
-              (dl,tw) <- get
-              ce <- liftIO $ isDirtyQueueEmpty wbc
-              if tw == (numWorkingThreads wbc) && ce then
-                lift $ mode3 dl
-                else
-                mode2
-          SEThreadWorking -> modify (\(di,tw) -> (di,tw-1)) >> mode2
-          SETimerWentOff -> mode2
-          AddDirtyItems ks ->
-            do
-              modify (\(cks,tw) -> (ks ++ cks,tw))
-              mode2
+
+        --check if there is still more work to do
+        ps <- fmap isProcessingStopped get
+        if ps then mode3
+          else
+          do
+            --wait for all work to be finished
+            wbc <- ask
+            event <- lift $ readEvent
+            
+            case (event) of
+              SEWorkerThreadProcessedItem ->
+                do
+                  workerThreadProcessedItem mode2 mode3
+              SETimerWentOff -> mode2 --ignore any timer event
+              AddDirtyItems ks -> --we can still get anchor items added at any time
+                --so we put them in frozen state
+                do
+                  modify (\ss -> ss { frozenKeys = (ks ++ (frozenKeys ss)) } )
+                  mode2
+              
     --TODO 3 consider that in AN, we'll may have the need to commit some data
     --directly to the disk as soon as it's received for less volatility... not sure
     --about this. 
-    mode3 :: (Keyable k) => [k] -> WBMonad k o ()
-    mode3 keys = do
+    mode3 :: (Keyable k) => StateT (SchedulerData k) (WBMonad k o) ()
+    mode3 = do
       liftIO $ putStrLn "mode3"
       --save the entire cache as a single transaction (so that if there is a power failure,
       --we either commit all or none)
-      lift $ atomically $ do
+
+      frozenKeys' <- fmap frozenKeys get
+      liftIO $ atomically $ do
         --we need to save off the new set of dirty keys
         
         --note that any previous set of dirty keys is discarded.
         --This is because when we start up, we copy all the dirty keys into
         --the processing queue, and so they will all be cleared anyway.
         ref <- newDBRef $ DirtyQueue []
-        writeDBRef ref $ DirtyQueue keys
+        writeDBRef ref $ DirtyQueue frozenKeys'
 
       wbc <- ask
       
       --now that were done with the save, we get back to work
-      if (isEmpty keys) then
-        mode3Purgatory --there are no dirty items, so we wait until one comes in
+      if (isEmpty frozenKeys') then
+        mode3Purgatory --there are no dirty keys to process, so we wait until one comes in
         else
         do
           --write out the list to the active queue so the threads start processing
-          addDirtyItems keys 
+          addDirtyItems' frozenKeys'
           mode1Prep
-          return ()
           
 
     --here, we wait until we get an item to process
-    mode3Purgatory :: (Keyable k) => WBMonad k o ()
+    mode3Purgatory :: (Keyable k) => StateT (SchedulerData k) (WBMonad k o) ()
     mode3Purgatory = do
       liftIO $ putStrLn "mode3Purgatory"
-      event <- readEvent
+      event <- lift $ readEvent
 
       case (event) of
         AddDirtyItems ks -> do
-          wbc <- ask
-
           --write to the input queue so the workers can get started
-          addDirtyItems ks
+          addDirtyItems' ks
           
-          runStateT mode1 0
-          return ()
+          mode1Prep --go back to processing
         _ -> mode3Purgatory
 
 
@@ -442,20 +469,28 @@ schedulerThread =
     wakeUpOnTimer :: (Keyable k) => WBMonad k o ()
     wakeUpOnTimer =
       do
-        liftIO $ putStrLn "wakeUpOnTimer"
         wbc <- ask
         lift $ startTimerThread (timeBetweenCommitsSecs wbc * 1000 * 1000) $ 
           putMVar (schedulerChannel wbc) SETimerWentOff
         return ()
 
 
--- | returns true if the dirty queue is empty
-isDirtyQueueEmpty :: WBConf k o -> IO Bool
-isDirtyQueueEmpty c = do
-  ip <- readIORef $ itemsProcessed c
-  ia <- readIORef $ itemsAdded c
+data SchedulerData k = SchedulerData {
+  itemsProcessed :: Int, --total items processed since start of scheduler thread
+  itemsAdded :: Int,  -- total items added to queue since start of scheduler thread
+  frozenKeys :: [k] --these are items added while we are saving
+                 --(these will only be anchor objects, since all
+                 --worker threads will be stopped at that time). We
+                 --hold on to them until we're ready to work again
+              
+  }
 
-  return $ ia - ip == 0
+--TODO 3: would like to replace all the "StateT ..." references with a type, but it requires rankntypes...not sure what this is
+--type SchedulerMonad k o = (Keyable k, WBObj o) => StateT (SchedulerData k) (WBMonad k o) ()
+
+-- | returns true if the dirty queue is empty
+isDirtyQueueEmpty :: SchedulerData k -> Bool
+isDirtyQueueEmpty c = itemsProcessed c - itemsAdded c == 0
 
 isEmpty :: [x] -> Bool
 isEmpty [] = True
@@ -471,37 +506,14 @@ startTimerThread waitTimeMicroSecs actionToPerform =
 workerThread :: (Keyable k, WBObj o) => WBMonad k o ()
 workerThread =
   do
-    iterateWhile isWorkingMode processItem
+    forever processItem
   where
-    isWorkingMode :: () -> Bool
-    isWorkingMode _ = True --TODO 1.5 we got to have a condition to
-                           --stop the train to save to the disk!
     processItem :: (Keyable k, WBObj o) => WBMonad k o ()
     processItem =
       do
         wbc <- ask
-        --check if the queue is empty and if it is, we notify the
-        --whiteboard that we are not working.  if all worker threads
-        --are all waiting and not working we know the job is done
-        (elem,readItAgain) <- lift $ tryReadChan (outChan wbc)
-        mkey <- lift $ tryRead elem
 
-        key <- lift $ case mkey of
-                         Nothing ->
-                           do
-                             --the queue is empty the last time we
-                             --read it, so we tell the scheduler that we are waiting
-                             putMVar (schedulerChannel wbc) SEThreadWaiting
-                             
-                             --now we read and block if its empty again
-                             key <- readItAgain
-
-                             --now that we are working again, we need
-                             --to note this fact
-                             putMVar (schedulerChannel wbc) SEThreadWorking
-
-                             return key
-                         Just key -> return key
+        key <- liftIO $ readChan (outChan wbc)
 
         --get the object for the key
         (Just obj) <- (lift $ atomically $ readDBRef $ getDBRef (show key)) -- :: (Keyable k, WBObj o) => WBMonad k o (Maybe (ObjMeta k o))
@@ -510,7 +522,7 @@ workerThread =
         runReaderT (actionFunc wbc) (key,obj)
 
         --we did a little bit of work, so we update the stats
-        liftIO $ atomicModifyIORef' (itemsProcessed wbc) (\ip -> (succ ip, ())) 
+        liftIO $ putMVar (schedulerChannel wbc) $ SEWorkerThreadProcessedItem
 
         return ()
         

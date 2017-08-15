@@ -302,7 +302,7 @@
 <node CREATED="1502173207276" ID="ID_560395371" MODIFIED="1502173247304" TEXT="this may seem bad, since we are effectively removing dirty status before we process it, but since we do not sync to disk until the threads have completed all processing, it doesn&apos;t cause a problem"/>
 <node CREATED="1502173247668" ID="ID_316801922" MODIFIED="1502173328880" TEXT="The rationale for this is that otherwise we&apos;ll need two queues. The original one and a second one for threads to pull work from, which is more complex"/>
 </node>
-<node CREATED="1502154914068" ID="ID_434955914" MODIFIED="1502187917942" TEXT="specifically works as follows">
+<node CREATED="1502154914068" FOLDED="true" ID="ID_434955914" MODIFIED="1502613790299" TEXT="specifically works as follows">
 <node CREATED="1502187917919" ID="ID_182887814" MODIFIED="1502187922045" TEXT="draft 1">
 <node CREATED="1502154921916" ID="ID_1876310931" MODIFIED="1502155020776" TEXT="Scheduler Thread waits for items to be added to dirty queue"/>
 <node CREATED="1502154936227" ID="ID_1430746453" MODIFIED="1502154955999" TEXT="When items are added, notifies a bunch of worker threads to process items"/>
