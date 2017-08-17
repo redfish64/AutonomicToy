@@ -26,6 +26,7 @@ executable agda-light
                        containers >= 0.5.7.1,
                        monad-loops >= 0.4.3,
                        mtl >= 2.2.1,
+                       parsec >= 3.1.11,
                        stm >= 2.4.4.1,
                        text >= 1.2.2.1,
                        unagi-chan >= 0.4.0.0
