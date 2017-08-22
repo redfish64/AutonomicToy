@@ -8,6 +8,7 @@ import qualified Data.Text as T
 import Text.ParserCombinators.Parsec.Language
 import qualified Text.ParserCombinators.Parsec.Token as Token
 import Data.Functor.Identity
+import qualified Data.Text.IO as I
 
 type ALParserM = ParsecT T.Text () ALIMonad
 
@@ -34,7 +35,7 @@ languageDef =
                                       -- , "and"
                                       -- , "or"
                                       ]
-            , Token.reservedOpNames = [":"-- , "-", "*", "/", ":="
+            , Token.reservedOpNames = [":", "=", "*", "/", ":="
                                       -- , "<", ">", "and", "or", "not"
                                       ]
             , caseSensitive  = True
@@ -78,4 +79,15 @@ fileParser = do
   
 
 varDef :: ALParserM ()
-varDef = undefined
+varDef = do
+  varName <- identifier
+  reservedOp ":"
+  varType <- expr
+  statementEnd
+  optional
+    do
+      varName2 <- expr
+      varName == varName2 or error
+      args <- many identifier
+      
+

@@ -28,7 +28,7 @@ data ALObj = ALFile { sfFilePath :: FilePath, sfContents ::  T.Text }
   |
   ALSym { srFile :: FilePath, srName :: SymName, srTypePos :: FilePos,
           srValPos :: FilePos, srType :: ParsedExpr, svExpr :: ParsedExpr }
-  deriving (Show,Read,Eq)
+  deriving (Show,Read,Eq, Ord)
 
 
 instance Serializable ALKey where
@@ -42,7 +42,7 @@ data ParsedExpr =
   PEExpr Expr -- a valid expression
   | PEEmpty  -- no expression present
   | PEError  -- error parsing expression
-  deriving (Show,Read,Eq)
+  deriving (Show,Read,Eq, Ord)
 
 data Expr =
   Var SymName
@@ -51,12 +51,12 @@ data Expr =
   | Pi SymName Type Type
   | Let SymName Type Expr Expr
   | Kind Kind
-  deriving (Show,Read,Eq)
+  deriving (Show,Read,Eq, Ord)
 
 type Type = Expr
 
 --TODO we need to implement agda's multi livels, I guess
 data Kind = Star | Box
-  deriving (Show,Read,Eq)
+  deriving (Show,Read,Eq, Ord)
 
 type ALIMonad = WBIMonad ALKey ALObj

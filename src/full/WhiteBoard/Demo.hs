@@ -40,7 +40,7 @@ _test argsStr =
 
 data File = File {
   contents :: T.Text
-  } deriving (Show, Read, Eq)
+  } deriving (Show, Read, Eq, Ord)
 
 instance Serializable File where
   serialize= BL.pack . show
@@ -50,7 +50,7 @@ instance WBObj File
 
 data Key = KFile FilePath deriving (Show, Read, Eq)
 
-data MyObj = MOFile FilePath T.Text | MOSym { name :: T.Text, typeText :: T.Text, valText :: T.Text } deriving (Show,Read,Eq)
+data MyObj = MOFile FilePath T.Text | MOSym { name :: T.Text, typeText :: T.Text, valText :: T.Text } deriving (Show,Read,Eq, Ord)
 
 instance WBObj MyObj where
 

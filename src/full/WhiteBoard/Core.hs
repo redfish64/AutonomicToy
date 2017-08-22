@@ -17,6 +17,8 @@ import Data.IORef
 import Control.Concurrent.MVar
 import Control.Concurrent (forkIO,threadDelay, ThreadId(..))
 import Control.Monad.State
+import Data.SortedList as SL
+import Control.Monad.Trans.Maybe
 
 --TODO 3 choosable file directory?
 -- | Opens a whiteboard. If the whiteboard doesn't exist already, it will be created empty.
@@ -45,10 +47,11 @@ createWBConf actionFunc =
 -- special, that way.
 addAnchorObjects :: (WBObj obj, Keyable k) => [(k,obj)] -> WBMonad k obj ()
 addAnchorObjects kv =
-  -- TODO 1.5 we need to look at dealing with updating an anchor object when
-  -- it already exists (error out), or when it is being refered to by other objects
-  --  (put them in the dirty queue)
-  let kp = fmap (\(k,v) -> (k,PValid v)) kv
+  -- TODO 1.5 we need to look at dealing with updating an anchor
+  -- object when it already exists (error out, or replace?), or when
+  -- it is being refered to by other objects (put them in the dirty
+  -- queue)
+  let kp = fmap (\(k,v) -> (k,SL.singleton v)) kv
   in
     do
       wbc <- ask
@@ -60,7 +63,7 @@ addAnchorObjects kv =
   where
     --saves a list of items, returning the keys of the objects that are dirty (ie weren't
     --already there, or were there but had a differing value)
-    saveItems :: (WBObj obj, Keyable k) => [(k, Payload obj)] -> STM [k]
+    saveItems :: (WBObj obj, Keyable k) => [(k,SortedList obj)] -> STM [k]
     saveItems items = foldM
       (\l i -> 
          do
@@ -70,7 +73,7 @@ addAnchorObjects kv =
              Just om -> return $ (WT.key om) : l
       ) [] items
     --saves an individual item. Returns true if dirty
-    saveItem :: (WBObj obj, Keyable k) => (k, Payload obj) -> STM (Maybe (ObjMeta k obj))
+    saveItem :: (WBObj obj, Keyable k) => (k, SortedList obj) -> STM (Maybe (ObjMeta k obj))
     saveItem (k, p) =
       do
         --TODO PERF 3 we may want to use a special method here so we get an abbr
@@ -103,7 +106,7 @@ addAnchorObjects kv =
         return om
         
 
-    updateObjMetaForPayload :: ObjMeta k obj -> Payload obj -> ObjMeta k obj
+    updateObjMetaForPayload :: ObjMeta k obj -> SortedList obj -> ObjMeta k obj
     updateObjMetaForPayload om p = om { payload = p }
 
 
@@ -143,7 +146,7 @@ getExistingOrEmptyObject k =
     meo <- readDBRef eor
     return $ maybe (ObjMeta {
                                WT.key = k,
-                               payload = PEmpty,
+                               payload = toSortedList [],
                                refererKeys = [],
                                referers = Just [],
                                storedObjKeys = [],
@@ -163,7 +166,7 @@ addToReferers key obj om =
 
 -- | used by keyToAction in WBConf to store an object. Key and object of stored object
 --   is passed in and the result of the store is returned
-storeObject :: (Keyable k, WBObj o) => k -> o -> WBIMonad k o StoreResult
+storeObject :: (Keyable k, WBObj o) => k -> o -> WBIMonad k o (SortedList o)
 storeObject k o =
   do
     (storerKey, storerObj) <- ask
@@ -171,11 +174,7 @@ storeObject k o =
     (shouldAddDirtyItems, eo) <- liftIO $ atomically $ do
       eo <- getExistingOrEmptyObject k
       --update object for this store action
-      let no =
-            (case (payload eo) of
-                PEmpty -> eo { payload = PValid o }
-                PMultipleStorers x -> eo { payload = PMultipleStorers (x+1) }
-                PValid _ -> eo { payload = PMultipleStorers 2 })
+      let no = eo { payload = insert o (payload eo) }
 
       -- add storer as a referer. We do this because if there is some
       -- error such as multiple storers, each storer must be returned
@@ -183,36 +182,21 @@ storeObject k o =
       -- away, the other storers need to be rerun
       let no' = addToReferers storerKey storerObj no 
 
-      return (isPayloadChangeSignificant (payload no') (payload eo), eo)
+      return  ((payload no') == (payload eo), eo)
 
     if shouldAddDirtyItems then
       do
-        wbc <- lift $ ask
+        wbc <- lift $ lift $ ask
         liftIO $ addDirtyItems wbc (refererKeys eo) -- note we use 'eo'(existing object) here
          -- because we don't want to rerun the current storer
       else return ()
 
-    return $ getStoreResultForPayload (payload eo)
-   where
-      isPayloadChangeSignificant :: (Eq o) => Payload o -> Payload o -> Bool
-      isPayloadChangeSignificant (PValid x) (PValid y) = x /= y
-      isPayloadChangeSignificant (PValid _) _ = True
-      isPayloadChangeSignificant (PMultipleStorers _) (PMultipleStorers _) = False
-      isPayloadChangeSignificant (PMultipleStorers _) _ = True
-      isPayloadChangeSignificant PEmpty PEmpty = False
-      isPayloadChangeSignificant PEmpty _ = True
-      getStoreResultForPayload :: Payload o -> StoreResult
-      getStoreResultForPayload (PValid _) = SRSuccess
-      getStoreResultForPayload (PMultipleStorers _) = SRErrorMultStorers
-      getStoreResultForPayload PEmpty = undefined -- should never happen
+    return (payload eo)
       
 
-data StoreResult = SRSuccess | SRErrorMultStorers
-
-                 
 data LoadResult o = LRSuccess o | LRErrorEmpty | LRErrorMultStorers
 
-loadObject :: (Keyable k, WBObj o) => k -> WBIMonad k o (LoadResult o)
+loadObject :: (Keyable k, WBObj o) => k -> WBIMonad k o (SortedList o)
 loadObject k =
   do
     (loaderKey, loaderObj) <- ask
@@ -221,14 +205,9 @@ loadObject k =
       --get the existing object.. if it doesn't exist, create an empty one
       eo <- fmap (addToReferers loaderKey loaderObj) $ getExistingOrEmptyObject k
 
-      return $ getLoadResultForPayload (payload eo)
+      return (payload eo)
 
   where
-    getLoadResultForPayload :: Payload o -> LoadResult o
-    getLoadResultForPayload (PValid x) = LRSuccess x
-    getLoadResultForPayload (PMultipleStorers _) = LRErrorMultStorers
-    getLoadResultForPayload PEmpty = LRErrorEmpty
-    
 
 -- TODO PERF 3 we need to think about cache and how to deal with removal
 -- the below "defaultCheck" will clear items from the cache once they exceed cache size
@@ -519,10 +498,17 @@ workerThread =
         (Just obj) <- (lift $ atomically $ readDBRef $ getDBRef (show key)) -- :: (Keyable k, WBObj o) => WBMonad k o (Maybe (ObjMeta k o))
 
         --use the key to create a task, and then run it
-        runReaderT (actionFunc wbc) (key,obj)
+        runReaderT (runMaybeT (actionFunc wbc)) (key,obj)
 
         --we did a little bit of work, so we update the stats
         liftIO $ putMVar (schedulerChannel wbc) $ SEWorkerThreadProcessedItem
 
         return ()
-        
+
+-- -- | returns the WBObj that is being processed on behalf of the
+-- --   thread
+-- getCurrWBObj :: WBIMonad k o (WBObj k o)
+-- getCurrWBObj =
+--   do
+--     (_,o) <- ask
+--     let (Payload

@@ -18,6 +18,8 @@ import WhiteBoard.Monitor
 import Control.Concurrent.Chan.Unagi
 import Control.Concurrent.MVar
 import Data.IORef
+import Control.Monad.Trans.Maybe
+import Data.SortedList as SL
 
 data WBConf k o = WBConf {
   numWorkingThreads :: Int, -- ^ number of threads to spin up for processing  
@@ -41,9 +43,11 @@ data SchedulerEvent k = SEWorkerThreadProcessedItem | SETimerWentOff | AddDirtyI
 -- | this is just an IO monad with the WBConf data 
 type WBMonad k o = ReaderT (WBConf k o) IO
 
--- | this is the WBMonad with the storer key and the storer obj. Meant to be used within
---   the keyToAction function.
-type WBIMonad k o = ReaderT (k,ObjMeta k o) (WBMonad k o) 
+{- | this is the monad used within the actionFunc. It can be used to store an object,
+     load an object associated to a key, or produce an error (which is the same as storing
+     an object, but there for convienience -}
+type WBIMonad k o = MaybeT (ReaderT (k,ObjMeta k o) (WBMonad k o))
+
 
 runWBMonad :: (WBConf k o) -> WBMonad k o x -> IO x
 runWBMonad wbc m = runReaderT m wbc
@@ -51,27 +55,29 @@ runWBMonad wbc m = runReaderT m wbc
 whiteBoardKey :: String
 whiteBoardKey = "_WhiteBoard"
 
-data Payload obj = PValid obj -- ^ valid object which can be stored in database
-  | PMultipleStorers Int -- ^ if multiple objects try to write to same object, it is an error, and no value is used. Number is the total number of storers
-  | PEmpty -- ^ No objects have stored the value for this object
-  deriving (Show, Read, Eq)
-
 data ObjMeta k o = ObjMeta {
   key :: k,
-  payload :: Payload o,
+  payload :: SortedList o,  -- ^ objects stored to this key.
   refererKeys :: [k], -- ^ objects that load, or store this object, so if it changes, they become dirty. In the case of storers, if there are multiple stores, we have to report an error, so this keeps track of them as well.
   referers :: Maybe [ObjMeta k o], -- ^ populated on demand from referersKeys
   storedObjKeys :: [k], -- ^ objects stored by this object. We need this to be able to clean
     --up objects, when the objects that are stored change when we rerun.
 
   storedObjs :: Maybe [ObjMeta k o] -- ^ populated on demand from storedObjsKeys
-  
   } deriving (Show,Read)
+
+instance (Ord o, Read o) => Read (SortedList o) where
+  readsPrec p = (\s -> fmap (\(l,str) -> (toSortedList l, str)) (readsPrec p s))
 
 instance (Show k) => Indexable (ObjMeta k o) where
   key = show . WhiteBoard.Types.key
 
-class (Typeable o,Serializable o,Eq o,Show o,Read o) => WBObj o
+{- | all objects stored into the whiteboard must implement this. Note that "Ord" is required
+     to help keep the system consistent when multiple items are added and read. (Since the
+     system is multi threaded, there is no way to determine which object will be written
+     first for two objects that share the same key) -}
+class (Typeable o,Serializable o,Eq o,Show o,Read o,
+       Ord o) => WBObj o
 
 instance (Keyable k, WBObj o) => Serializable (ObjMeta k o) where
   --TODO 3.5 PERF make these more binary'ie
@@ -83,9 +89,16 @@ type WBId = Text
 
 class (Typeable k,Serializable k,Eq k,Show k,Read k) => Keyable k
 
-data DirtyQueue k = DirtyQueue [k] deriving (Eq,Read,Show,Typeable)
+data DirtyQueue k = DirtyQueue [k] deriving (Read,Show,Typeable)
 
-instance (Keyable k) => WBObj (DirtyQueue k)
+-- instance Eq (DirtyQueue k) where
+--   _ == _ = True -- DirtyQueue is a singleton instance, so there never will be a need to compare items
+  
+-- instance Ord (DirtyQueue k) where
+--   _ == _ = True -- DirtyQueue is a singleton instance, so there never will be a need to compare items
+  
+
+-- instance (Keyable k) => WBObj (DirtyQueue k)
 
 instance (Keyable k) => Serializable (DirtyQueue k) where
   --TODO 3.5 PERF make these more binary'ie
@@ -97,3 +110,4 @@ instance Indexable (DirtyQueue k) where
   key _ = "DIRTY QUEUE!"
 
     
+   
